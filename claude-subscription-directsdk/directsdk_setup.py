@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 try:
     from .admission import Admission
@@ -58,6 +59,11 @@ def _resolve(command, env):
 PLUGIN_ID = "claude-subscription-directsdk-experimental"
 TELEMETRY_SETTING = "claude_code_telemetry"
 CONFIG_DIR_SETTING = "claude_config_dir"
+# Opt-in gateway mode (fork addition): route native through an Anthropic-compatible HTTPS gateway that holds
+# the subscription login itself (e.g. a CLIProxyAPI hub), authenticated with a gateway key read from the
+# named Hermes environment variable. Unset, the plugin behaves exactly as upstream.
+GATEWAY_URL_SETTING = "upstream_base_url"
+GATEWAY_AUTH_SETTING = "upstream_auth_env"
 # Any one of these turns off Claude Code's feature-flag fetch, and with it every model its picker
 # only offers through a flag (#86: 11 models become 5). Off only when the user turns the setting off.
 QUIET_TRAFFIC = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1"}
@@ -109,6 +115,47 @@ def _setting(key, default=None):
             return default
         value = value[segment]
     return value
+
+
+class GatewayError(ValueError):
+    """Gateway mode is configured but unusable (bad URL, missing key)."""
+
+
+def gateway(env=None):
+    """``(base_url, token)`` of the configured gateway, or ``None`` when gateway mode is off.
+
+    Raises ``GatewayError`` when ``upstream_base_url`` is set but the URL is not HTTPS or the key
+    variable named by ``upstream_auth_env`` is unset or empty, so a misconfiguration never falls
+    back to a first-party request.
+    """
+    url = _setting(GATEWAY_URL_SETTING)
+    url = url.strip().rstrip("/") if isinstance(url, str) else ""
+    if not url:
+        return None
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+        raise GatewayError(f"{GATEWAY_URL_SETTING} must be a plain https:// URL")
+    name = _setting(GATEWAY_AUTH_SETTING)
+    name = name.strip() if isinstance(name, str) else ""
+    if not name:
+        raise GatewayError(f"{GATEWAY_URL_SETTING} is set but {GATEWAY_AUTH_SETTING} names no environment variable")
+    token = (env if env is not None else os.environ).get(name, "")
+    if not token.strip():
+        raise GatewayError(f"{GATEWAY_AUTH_SETTING} variable {name} is unset or empty")
+    return url, token.strip()
+
+
+def apply_gateway(env, route):
+    """Point a child env at the gateway, in place: its URL becomes the relay upstream, its key the bearer.
+
+    Any subscription token Hermes inherited is removed, so the gateway never receives one.
+    """
+    url, token = route
+    for key in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_FOUNDRY_API_KEY"):
+        env.pop(key, None)
+    env["ANTHROPIC_BASE_URL"] = url
+    env["ANTHROPIC_AUTH_TOKEN"] = token
+    return env
 
 
 def telemetry_enabled():
@@ -164,6 +211,14 @@ def setup_status(command=None, env=None, timeout=20):
         return {"available": False, "logged_in": False, "plan": "", "detail": INSTALL_HINT, "login_command": None}
     login_command = resolved + ["auth", "login"]
     try:
+        route = gateway(env)
+    except GatewayError as exc:
+        return {"available": True, "logged_in": False, "plan": "", "detail": str(exc), "login_command": None}
+    if route is not None:
+        # The gateway holds the login; no local `claude auth login` is needed or wanted.
+        return {"available": True, "logged_in": True, "plan": "via " + urlsplit(route[0]).hostname,
+                "detail": "", "login_command": None}
+    try:
         run = subprocess.run(resolved + ["auth", "status"], env=_child_env(env), stdin=subprocess.DEVNULL,
                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         auth = json.loads(run.stdout) if run.stdout.strip().startswith("{") else {}
@@ -186,6 +241,12 @@ def discover_models(command=None, env=None, timeout=40):
     """The account's live picker as ``[{id, label, note, upstream_requests}]`` in Hermes route ids,
     or ``None`` when the CLI is missing, logged out, or the handshake fails."""
     env = dict(env if env is not None else os.environ)
+    try:
+        if gateway(env) is not None:
+            # Behind a gateway native serves only its generic list (not_first_party); keep the pinned catalog.
+            return None
+    except GatewayError:
+        return None
     resolved = _resolve(command, env)
     # Logged out, the handshake still answers with a generic default list; only a signed-in
     # account's picker reflects its entitlements.
@@ -295,6 +356,11 @@ def fetch_usage(command=None, env=None, timeout=8):
     admission gate (zero inference), and fits under core's 10 s ``/usage`` hook deadline.
     """
     env = dict(env if env is not None else os.environ)
+    try:
+        if gateway(env) is not None:
+            return None, "plan limits are reported by the gateway (upstream_base_url), not by a local Claude login"
+    except GatewayError as exc:
+        return None, str(exc)
     resolved = _resolve(command, env)
     if resolved is None:
         return None, INSTALL_HINT

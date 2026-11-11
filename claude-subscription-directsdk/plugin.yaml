@@ -1,6 +1,6 @@
 name: claude-subscription-directsdk-experimental
 kind: model-provider
-version: 0.3.5
+version: 0.3.5+gateway.1
 manifest_version: 2
 description: Claude Subscription DirectSDK (Experimental) — drive your Claude Pro/Max subscription through the official Claude Code CLI; Hermes owns tools, approvals and compaction
 author: Nous Research
@@ -31,3 +31,18 @@ config_schema:
       Let Claude Code send its usage telemetry and fetch feature flags. Feature flags unlock newer
       models in the model picker; turn off to keep Claude Code quiet (the picker may then list fewer
       models).
+  upstream_base_url:
+    type: string
+    default: ""
+    label: Gateway base URL (fork)
+    description: >-
+      Optional https:// base URL of an Anthropic-compatible gateway (e.g. a CLIProxyAPI hub) that holds the
+      Claude subscription login. When set, the relay forwards to it instead of api.anthropic.com and no
+      local `claude auth login` is needed. Leave empty for upstream behaviour.
+  upstream_auth_env:
+    type: string
+    default: ""
+    label: Gateway key environment variable (fork)
+    description: >-
+      Name of the Hermes environment variable holding the gateway's access key (sent as the bearer token).
+      Required when the gateway base URL is set.

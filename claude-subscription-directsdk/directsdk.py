@@ -30,14 +30,14 @@ try:
     from .admission import Admission
     from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from .directsdk_setup import (
-        INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy,
-        drop_api_credentials)
+        INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_config_dir, apply_gateway, apply_traffic_policy,
+        drop_api_credentials, gateway)
 except ImportError:
     from admission import Admission
     from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from directsdk_setup import (
-        INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy,
-        drop_api_credentials)
+        INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_config_dir, apply_gateway, apply_traffic_policy,
+        drop_api_credentials, gateway)
 
 
 # Hermes picks retry vs fallback from an error's status_code (main loop and auxiliary ladder alike).
@@ -807,6 +807,10 @@ class Client:
                     conflicts += [key for key in ('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY') if env.get(key, '').lower() not in ('', '0', 'false', 'no', 'off')]
                     if conflicts:
                         raise ValueError('OAuth provider refuses conflicting native auth/backend overrides: ' + ', '.join(conflicts))
+                    # Fork addition: an explicitly configured gateway replaces api.anthropic.com as the relay upstream.
+                    route = gateway(env)
+                    if route is not None:
+                        apply_gateway(env, route)
                 # Fail with the install hint, not a Popen FileNotFoundError, when Claude Code is absent.
                 resolved = resolve_claude(self.command, env)
                 if resolved is None:
@@ -1012,6 +1016,8 @@ class Client:
                         # The child's own HOME, not Hermes': that is where native looked for ~/.claude.
                         home = env.get('HOME') or env.get('USERPROFILE')
                         login = env.get('CLAUDE_CONFIG_DIR') or str((Path(home) if home else Path.home()) / '.claude')
+                        if env.get('ANTHROPIC_AUTH_TOKEN') and self.env is None:
+                            raise ClaudeCodeLoggedOut(f'Claude Code refused the gateway key before any upstream request (native: {native_error}; cli: {resolved[0]}){_stderr_tail(native_stderr)}')
                         raise ClaudeCodeLoggedOut(f'{LOGGED_OUT_HINT} (native: {native_error}; cli: {resolved[0]}; login: {login}){_stderr_tail(native_stderr)}')
                     raise ClaudeAPIError('Native API error: ' + native_error, NATIVE_ERROR_STATUS.get(str(native_error_code)))
                 if len(results) != 1 or not assistants or not stopped:

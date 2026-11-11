@@ -106,6 +106,30 @@ hermes config set plugins.entries.claude-subscription-directsdk-experimental.set
 
 It is read for the active profile on every spawn, so it applies to the next request without a restart. Whatever the setting, the plugin never lets the CLI auto-update itself, use its feedback upload path or send its own session-title request (`DISABLE_AUTOUPDATER`, `DISABLE_FEEDBACK_COMMAND`, `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`), and an opt-out you export yourself (`DISABLE_TELEMETRY`, `DO_NOT_TRACK`, ...) is passed through untouched.
 
+### Gateway mode (fork addition)
+
+This fork (`andreymir/hermes-official-plugins`, branch `hub-upstream`) adds an opt-in gateway mode for an
+Anthropic-compatible HTTPS gateway that itself holds the Claude subscription login, such as a CLIProxyAPI hub
+that admits the `hermes-agent` Claude Code entrypoint:
+
+```yaml
+plugins:
+  entries:
+    claude-subscription-directsdk-experimental:
+      settings:
+        upstream_base_url: https://hub.example.com
+        upstream_auth_env: CLIPROXY_API_KEY
+```
+
+With both set, the per-request relay forwards native's single Messages request to the gateway instead of
+`api.anthropic.com`, and native authenticates with `ANTHROPIC_AUTH_TOKEN` set to the value of the named
+environment variable. No local `claude auth login` is needed; an inherited `CLAUDE_CODE_OAUTH_TOKEN` or API key
+is removed so no subscription credential reaches the gateway. Setup reports the provider as signed in "via"
+the gateway host, model discovery falls back to the pinned catalog (native serves its account picker only
+first-party), and `/usage` reports plan limits as unavailable (read them from the gateway). An unset key
+variable or a non-HTTPS URL fails the request before Claude Code starts. An inherited `ANTHROPIC_BASE_URL` is
+still refused. Without the settings the plugin behaves exactly as upstream.
+
 ## Ownership and replay
 
 Each `chat.completions.create` starts a fresh process in a private temporary directory. Native tools, skills and setting sources are disabled. MCP advertises only the current Hermes tool inventory, has inert callbacks, and is denied execution by native `dontAsk`. Full descriptions and schemas are supplied through tools plus validated generation fields in `CLAUDE_CODE_EXTRA_BODY`, applied from a private native settings file; the system prompt uses a private file too. This avoids the OS per-argument/environment-string limit. Authentication and identity fields are never replaced.
